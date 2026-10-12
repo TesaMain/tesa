@@ -1,0 +1,17 @@
+.anchor
+.surfpool
+.DS_Store
+target
+**/*.rs.bk
+node_modules
+test-ledger
+.yarn
+dist
+dist-demo
+*.log
+
+# Especificação interna, fica fora do repositório público
+CLAUDE.md
+
+# Chaves de demo (testnet) geradas por app/scripts/setup-demo.ts
+app/src/demo-config.json
