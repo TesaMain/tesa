@@ -6,8 +6,9 @@ Tesa is B2B treasury software. Fintechs and companies keep their USDC in their o
 CCTP. Treasury rules are enforced on-chain by the `tesa_policy` program, and Tesa can only
 **propose** operations: the client's signers approve and execute them.
 
-**Live demo:** [demo.t3sa.com](https://demo.t3sa.com) — runs on Solana testnet, reads and signs
-directly from the browser. · **Site:** [t3sa.com](https://t3sa.com)
+**Live demo:** [demo.t3sa.com](https://demo.t3sa.com) — runs on Solana devnet with real Circle test
+USDC bridged from Ethereum Sepolia via CCTP, and reads and signs directly from the browser. ·
+**Site:** [t3sa.com](https://t3sa.com)
 
 - **Non-custodial.** Money never leaves an account the client controls.
 - **Tesa proposes, the client signs.** Tesa's key has the Squads `Initiate` permission only.
@@ -59,9 +60,11 @@ the vault back toward the policy.
 ## What the demo shows
 
 The panel at [demo.t3sa.com](https://demo.t3sa.com) runs against real Squads v4 and `tesa_policy`
-programs on Solana testnet:
+programs on Solana devnet:
 
-1. USDC arrives in the vault from Ethereum (CCTP leg simulated, see below).
+1. USDC arrives in the vault from Ethereum with **Circle CCTP V2, for real**: a burn on Ethereum
+   Sepolia, an attestation from Circle and a mint of Circle's test USDC into the vault on Solana
+   devnet, in about 30 seconds. The vault signs nothing.
 2. The Tesa key proposes an allocation. When it tries to approve, the transaction fails on-chain
    with `Unauthorized`.
 3. CFO and Controller approve; the vault executes `begin_op → swap → end_op` in about a second.
@@ -71,11 +74,21 @@ programs on Solana testnet:
 6. A higher NAV is published: yield grows for the vault and for each of the fintech's customers.
 7. A redemption settles in about a second.
 
-**Simulated in the demo:** USDC and USDY are test tokens, the swap is `mock_swap` (configurable
-price and slippage), the CCTP deposit only mints test USDC (Circle's CCTP connects Ethereum Sepolia
-to Solana devnet, not testnet), and the per-customer split is computed in the panel from on-chain
-data. Demo keys for every role are bundled in the page, so anyone with the link can operate the
-demo vault. They hold testnet SOL only.
+**Real in the demo:** the CCTP transfer (Circle's contracts on Sepolia, Circle's attestation
+service, Circle's test USDC on Solana devnet), the Squads v4 multisig and approvals, and every
+`tesa_policy` check.
+
+**Simulated in the demo:** USDY and its market. USDY does not exist on test networks, so the swap is
+`mock_swap` (a simulated USDY mint with configurable price and slippage) and a demo key publishes the
+USDY NAV. On mainnet the swap is Jupiter → Orca and the asset is Ondo's USDY. The per-customer split
+is computed in the panel from on-chain data. Amounts are small (tens of USDC) because they are real
+Circle test USDC from Circle's faucet, and the policy limits are scaled to match.
+
+Demo keys for every role, including the Ethereum Sepolia wallet that sends the bridge, are bundled
+in the page, so anyone with the link can operate the demo vault. They hold test funds only.
+
+Example CCTP transfer (1 USDC): [burn on Sepolia](https://sepolia.etherscan.io/tx/0x42c216695de9f5f4a7c1eed5bcde30e46ae418a12d8b6e5d4a4afb7007ac733e) ·
+[mint on Solana devnet](https://solscan.io/tx/3BR6JqmSPLnsm9z8zokyGyocA2R1b8BNLpzWFq1hTSaWLpusmT9nBUEpacyesrkoxVSHW3J5c2eWu5WBoRRnsLMr?cluster=devnet).
 
 ## Repository
 
@@ -85,7 +98,8 @@ programs/mock_swap/     simulated USDY mint + swap with configurable price and s
 tests/tesa_policy.ts    every policy check, success and failure, atomicity after each failure
 tests/squads.ts         the same flow through a Squads v4 multisig (permissions, approvals, execution)
 tests/fixtures/         Squads v4 program and ProgramConfig dumped from mainnet, loaded into the local validator
-app/                    demo panel (Vite + React), reads and signs on testnet with no backend
+app/                    demo panel (Vite + React), reads and signs on devnet with no backend
+app/src/cctp.ts         Circle CCTP V2: burn on Sepolia, attestation polling, receiveMessage on Solana
 docs/dev-notes-pt.md    detailed development notes and design decisions (Portuguese)
 ```
 
@@ -118,11 +132,16 @@ cargo test -p tesa_policy     # unit tests for the policy math
 ```bash
 cd app
 yarn install
-# creates a fresh demo vault on testnet (multisig, test tokens, policy) and writes src/demo-config.json
-# needs ~1 testnet SOL in ~/.config/solana/id.json
-RPC_URL=https://api.testnet.solana.com CLUSTER=testnet npx tsx scripts/setup-demo.ts
+# Ethereum Sepolia wallet for the bridge: {"privateKey": "0x…"} in ~/.config/tesa/sepolia-demo.json,
+# funded with Sepolia ETH (gas) and Circle test USDC (faucet.circle.com)
+npx tsx scripts/cctp-bridge.ts 1   # one real CCTP transfer into your own devnet USDC account
+# creates a fresh demo vault on devnet (multisig, policy, simulated USDY), funds it with 20 USDC
+# through CCTP and writes src/demo-config.json; needs ~1.2 devnet SOL in ~/.config/solana/id.json
+MODE=cctp npx tsx scripts/setup-demo.ts
 yarn dev
 ```
+
+Without `MODE=cctp`, the setup creates a testnet vault with simulated USDC instead.
 
 See [`app/src/demo-config.example.json`](app/src/demo-config.example.json) for the shape of the
 generated file.
@@ -135,7 +154,7 @@ generated file.
 | Rules | `tesa_policy` (Rust, Anchor 1.2.1) | same, plus on-chain sub-accounts per end customer |
 | Swap | `mock_swap` | Jupiter Swap API v2 → Orca USDY/USDC, Squads transaction buffer + lookup tables |
 | Price | Tesa-maintained `PriceFeed` (USDY NAV) | Pyth USDY feed when an active one exists |
-| Cross-chain | simulated deposit | Circle CCTP V2 |
+| Cross-chain | Circle CCTP V2, live (Sepolia → Solana devnet) | same on mainnet |
 | Panel | React + Vite, static on Netlify | Next.js with real wallets |
 | Backend | none (browser talks to Solana) | Fastify API, Helius webhooks, Postgres cache |
 

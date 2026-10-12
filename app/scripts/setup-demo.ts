@@ -1,9 +1,11 @@
-// Cria o cofre de demonstração do painel numa rede pública (testnet por padrão):
-// multisig Squads v4 com as permissões da seção 3.1, USDC/USDY simulados, swap simulado,
-// preço de referência, política inicializada pelo vault e uma alocação de histórico.
-// Grava src/demo-config.json, que o painel lê.
+// Cria o cofre de demonstração do painel numa rede pública:
+// multisig Squads v4 com as permissões da seção 3.1, USDY e swap simulados, preço de referência,
+// política inicializada pelo vault e uma alocação de histórico. Grava src/demo-config.json.
 //
-//   RPC_URL=https://api.testnet.solana.com CLUSTER=testnet npx tsx scripts/setup-demo.ts
+//   MODE=cctp npx tsx scripts/setup-demo.ts   devnet; USDC real da Circle chega ao cofre via CCTP
+//                                             (Sepolia → Solana), com a carteira de
+//                                             ~/.config/tesa/sepolia-demo.json
+//   npx tsx scripts/setup-demo.ts             testnet; USDC simulado (100.000)
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import * as multisig from "@sqds/multisig";
@@ -16,23 +18,35 @@ import {
   TransactionInstruction,
   type TransactionInstruction as Ix,
 } from "@solana/web3.js";
+import type { Hex } from "viem";
 import { TesaDemo, TOKEN_PROGRAM_ID, minOutFor, quoteOut, toUnits, fmt, type DemoConfig, type Role, type TxResult } from "../src/chain";
+import { CCTP, burnOnSepolia, fastTransferMaxFee, receiveMessageIx, waitForAttestation } from "../src/cctp";
 
-const RPC_URL = process.env.RPC_URL ?? "https://api.testnet.solana.com";
-const CLUSTER = process.env.CLUSTER ?? "testnet";
+const CCTP_MODE = process.env.MODE === "cctp";
+const RPC_URL = process.env.RPC_URL ?? (CCTP_MODE ? "https://api.devnet.solana.com" : "https://api.testnet.solana.com");
+const CLUSTER = process.env.CLUSTER ?? (CCTP_MODE ? "devnet" : "testnet");
 const OUT = process.env.OUT ?? "src/demo-config.json";
 const ATA_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
+// Com USDC real (CCTP) os valores são os que o faucet da Circle permite; a política escala junto.
+const SCALE = CCTP_MODE
+  ? { vault: 20, reserveSeed: 0.9, minLiquid: 2, maxOp: 10, history: 5 }
+  : { vault: 100_000, reserveSeed: 5_000_000, minLiquid: 10_000, maxOp: 50_000, history: 30_000 };
+const usd = (n: number) => new BN(toUnits(n).toString());
 
 const PRICE_START = 1_120_000_000n; // NAV de US$1,12 na alocação de histórico
 const PRICE_NOW = 1_141_000_000n; // NAV publicado depois: o rendimento aparece no painel
 const HAIRCUT_BPS = 20;
 const POLICY = {
   maxYieldBps: 7000,
-  minLiquidUsdc: new BN(toUnits(10_000).toString()),
-  maxOpUsdc: new BN(toUnits(50_000).toString()),
+  minLiquidUsdc: usd(SCALE.minLiquid),
+  maxOpUsdc: usd(SCALE.maxOp),
   maxSlippageBps: 100,
   maxPriceAgeSecs: 3600,
 };
+const sepoliaKey = CCTP_MODE
+  ? (JSON.parse(readFileSync(`${homedir()}/.config/tesa/sepolia-demo.json`, "utf8")) as { privateKey: Hex }).privateKey
+  : undefined;
 
 const conn = new Connection(RPC_URL, "confirmed");
 const funder = Keypair.fromSecretKey(
@@ -81,6 +95,21 @@ async function createMintIxs(payer: PublicKey, mint: PublicKey, authority: Publi
   ];
 }
 
+const transferIx = (from: PublicKey, to: PublicKey, owner: PublicKey, amount: bigint) => {
+  const data = Buffer.alloc(9);
+  data.writeUInt8(3, 0); // Transfer
+  data.writeBigUInt64LE(amount, 1);
+  return new TransactionInstruction({
+    programId: TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: from, isSigner: false, isWritable: true },
+      { pubkey: to, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: true, isWritable: false },
+    ],
+    data,
+  });
+};
+
 const mintToIx = (mint: PublicKey, to: PublicKey, authority: PublicKey, amount: bigint) => {
   const data = Buffer.alloc(9);
   data.writeUInt8(7, 0);
@@ -111,7 +140,7 @@ async function main() {
 
   const [multisigPda] = multisig.getMultisigPda({ createKey: createKey.publicKey });
   const [vault] = multisig.getVaultPda({ multisigPda, index: 0 });
-  const usdcMint = usdcMintKp.publicKey;
+  const usdcMint = CCTP_MODE ? CCTP.solana.usdcMint : usdcMintKp.publicKey;
   const usdyMint = usdyMintKp.publicKey;
 
   // Endereços derivados antes de criar qualquer coisa: o cliente do painel já pode ser montado.
@@ -135,6 +164,7 @@ async function main() {
     policy: pda([Buffer.from("policy"), vault.toBuffer()], policyPid).toBase58(),
     position: pda([Buffer.from("position"), vault.toBuffer()], policyPid).toBase58(),
     keys: Object.fromEntries(Object.entries(keys).map(([r, k]) => [r, Array.from(k.secretKey)])) as Record<Role, number[]>,
+    ...(sepoliaKey ? { sepoliaKey } : {}),
   };
   // Grava antes de qualquer transação: se algo falhar no meio, as chaves não se perdem.
   writeFileSync(OUT, JSON.stringify(cfg, null, 2) + "\n");
@@ -178,20 +208,31 @@ async function main() {
     "multisig created"
   );
 
-  step("Simulated USDC and USDY, vault token accounts, 100,000 USDC in the vault");
-  must(
-    await demo.send(
-      [
-        ...(await createMintIxs(op, usdcMint, op)),
-        ...(await createMintIxs(op, usdyMint, swapConfig)),
-        createAtaIx(op, vault, usdcMint),
-        createAtaIx(op, vault, usdyMint),
-        mintToIx(usdcMint, ata(vault, usdcMint), op, toUnits(100_000)),
-      ],
-      [keys.operator, usdcMintKp, usdyMintKp]
-    ),
-    "mints + vault ATAs"
-  );
+  if (CCTP_MODE) {
+    step("Simulated USDY mint and the vault's token accounts (USDC is Circle's devnet USDC)");
+    must(
+      await demo.send(
+        [...(await createMintIxs(op, usdyMint, swapConfig)), createAtaIx(op, vault, usdcMint), createAtaIx(op, vault, usdyMint)],
+        [keys.operator, usdyMintKp]
+      ),
+      "USDY mint + vault ATAs"
+    );
+  } else {
+    step("Simulated USDC and USDY, vault token accounts, 100,000 USDC in the vault");
+    must(
+      await demo.send(
+        [
+          ...(await createMintIxs(op, usdcMint, op)),
+          ...(await createMintIxs(op, usdyMint, swapConfig)),
+          createAtaIx(op, vault, usdcMint),
+          createAtaIx(op, vault, usdyMint),
+          mintToIx(usdcMint, ata(vault, usdcMint), op, toUnits(SCALE.vault)),
+        ],
+        [keys.operator, usdcMintKp, usdyMintKp]
+      ),
+      "mints + vault ATAs"
+    );
+  }
 
   step("Simulated market (mock swap) and the USDY reference price");
   const now = await demo.chainTime();
@@ -210,7 +251,7 @@ async function main() {
             systemProgram: SystemProgram.programId,
           })
           .instruction(),
-        mintToIx(usdcMint, demo.pk.reserveUsdc, op, toUnits(5_000_000)),
+        ...(CCTP_MODE ? [] : [mintToIx(usdcMint, demo.pk.reserveUsdc, op, toUnits(SCALE.reserveSeed))]),
         await demo.policyProgram.methods
           .initPriceFeed(new BN(PRICE_START.toString()), new BN(now - 2))
           .accountsPartial({ authority: op, priceFeed: demo.pk.priceFeed, yieldMint: usdyMint })
@@ -220,6 +261,25 @@ async function main() {
     ),
     "mock swap + price feed"
   );
+
+  if (CCTP_MODE) {
+    // A reserva do swap simulado paga os resgates; começa com USDC real já trazido para a carteira local.
+    step(`Seeding the simulated market's reserve with ${SCALE.reserveSeed} real USDC from the local wallet`);
+    must(
+      await demo.send([transferIx(ata(funder.publicKey, usdcMint), demo.pk.reserveUsdc, funder.publicKey, toUnits(SCALE.reserveSeed))], [funder]),
+      "reserve seeded"
+    );
+
+    step(`Real Circle CCTP: ${SCALE.vault} USDC from Ethereum Sepolia into the vault on Solana devnet`);
+    const t0 = Date.now();
+    const amount = toUnits(SCALE.vault);
+    const { maxFee } = await fastTransferMaxFee(amount);
+    const { burnHash } = await burnOnSepolia(sepoliaKey!, amount, ata(vault, usdcMint), maxFee);
+    console.log(`  ✓ burned on Sepolia (${((Date.now() - t0) / 1000).toFixed(1)}s) ${CCTP.sepolia.explorerTx(burnHash)}`);
+    const att = await waitForAttestation(burnHash);
+    console.log(`  ✓ attested by Circle (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+    must(await demo.send([await receiveMessageIx(conn, funder.publicKey, att, ata(vault, usdcMint))], [funder]), "minted into the vault");
+  }
 
   const flow = async (ixs: Ix[], memo: string) => {
     const p = await demo.propose(ixs, memo);
@@ -248,10 +308,10 @@ async function main() {
     "Initialize the policy"
   );
 
-  step("History: allocate 30,000 USDC at NAV 1.12, then the NAV rises to 1.141");
-  const amount = toUnits(30_000);
+  step(`History: allocate ${SCALE.history.toLocaleString("en-US")} USDC at NAV 1.12, then the NAV rises to 1.141`);
+  const amount = toUnits(SCALE.history);
   const quote = quoteOut("allocate", amount, PRICE_START, BigInt(HAIRCUT_BPS));
-  await flow(await demo.opIxs("allocate", amount, minOutFor(quote)), "Allocate 30,000 USDC");
+  await flow(await demo.opIxs("allocate", amount, minOutFor(quote)), `Allocate ${SCALE.history} USDC`);
   must(await demo.publishNav(PRICE_NOW), "NAV published at 1.141");
 
   const s = await demo.state();

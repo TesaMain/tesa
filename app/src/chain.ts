@@ -12,6 +12,7 @@ import {
   TransactionInstruction,
   TransactionMessage,
 } from "@solana/web3.js";
+import { receiveMessageIx, type Attested } from "./cctp";
 import policyIdl from "./idl/tesa_policy.json";
 import swapIdl from "./idl/mock_swap.json";
 
@@ -38,6 +39,8 @@ export type DemoConfig = {
   policy: string;
   position: string;
   keys: Record<Role, number[]>;
+  /** Carteira Ethereum Sepolia da demo (CCTP real); só no modo devnet. */
+  sepoliaKey?: string;
 };
 
 /** Papéis da seção 3.1, mais o operador da demo (NAV da Ondo, mercado simulado, faucet de USDC). */
@@ -574,24 +577,11 @@ export class TesaDemo {
     );
   }
 
-  /** Faucet de USDC simulado para o vault (o operador é a mint authority). */
-  async mintUsdcToVault(amount: bigint) {
-    const data = Buffer.alloc(9);
-    data.writeUInt8(7, 0); // MintTo
-    data.writeBigUInt64LE(amount, 1);
-    return this.send(
-      [
-        new TransactionInstruction({
-          programId: TOKEN_PROGRAM_ID,
-          keys: [
-            { pubkey: this.pk.usdcMint, isSigner: false, isWritable: true },
-            { pubkey: this.pk.vaultUsdc, isSigner: false, isWritable: true },
-            { pubkey: this.keys.operator.publicKey, isSigner: true, isWritable: false },
-          ],
-          data,
-        }),
-      ],
-      [this.keys.operator]
-    );
+  /**
+   * Último passo do CCTP: entrega a mensagem atestada pela Circle e cunha USDC na conta do cofre.
+   * Qualquer chave pode entregar (o operador paga a taxa); o cofre não assina nada.
+   */
+  async receiveIntoVault(att: Attested) {
+    return this.send([await receiveMessageIx(this.conn, this.keys.operator.publicKey, att, this.pk.vaultUsdc)], [this.keys.operator]);
   }
 }

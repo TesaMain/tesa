@@ -10,6 +10,8 @@ export type LogEntry = {
   result?: TxResult;
   pending: boolean;
   note?: string;
+  /** Link extra (ex.: o burn no Etherscan de uma transferência CCTP). */
+  extra?: { href: string; label: string };
 };
 
 const STATE_EVERY_MS = 8_000;

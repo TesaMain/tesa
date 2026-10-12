@@ -189,9 +189,11 @@ as regras da política, as propostas da Squads com os botões de cada papel, o h
 um log das transações da sessão com o tempo de liquidação. Um roteiro de 8 passos guia a
 apresentação (seção 7, sem a mainnet).
 
-**Simulados na história da demo.** "Bridge from Ethereum" representa um depósito via Circle
-CCTP, mas apenas cunha USDC simulado no cofre: o CCTP real só liga Sepolia à **devnet** da Solana,
-não à testnet. O card "Fintech customers" divide valor e rendimento do cofre entre 3 clientes de
+**CCTP real (devnet).** A demo foi para a devnet porque o CCTP da Circle só liga Sepolia à
+**devnet** da Solana. "Bridge from Ethereum" faz burn real no Sepolia, espera a atestação da Circle
+e chama `receiveMessage` na Solana, cunhando USDC de teste da Circle direto na conta do cofre
+(`app/src/cctp.ts`; contas conforme `examples/v2/solana.ts` do repositório oficial, mais as contas
+`#[event_cpi]` do MessageTransmitterV2). Simulados: USDY e o swap (não existem em redes de teste). O card "Fintech customers" divide valor e rendimento do cofre entre 3 clientes de
 exemplo com participação fixa (40/35/25%), com 10% do rendimento como taxa da fintech. É um
 cálculo no painel a partir dos dados on-chain; sub-contas on-chain por cliente ficam no roadmap.
 

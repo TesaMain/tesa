@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { Hex } from "viem";
+import { CCTP, burnOnSepolia, fastTransferMaxFee, sepoliaBalances, waitForAttestation } from "./cctp";
 import {
   ERROR_TEXT,
   HUMANS,
@@ -33,10 +35,11 @@ const ago = (secs: number) =>
 
 const PAGES = [
   { id: "operations", label: "Operations", title: "Operations", sub: "Propose, approve and execute treasury operations on the client's vault." },
+  { id: "bridge", label: "Bridge from Ethereum", title: "Bridge from Ethereum", sub: "Real Circle CCTP: USDC leaves Ethereum Sepolia and lands in the vault on Solana devnet." },
   { id: "customers", label: "Customers", title: "Fintech customers", sub: "How the vault's yield reaches the fintech's own customers." },
   { id: "policy", label: "Policy", title: "Policy, enforced on-chain", sub: "The treasury rules every operation must pass." },
   { id: "history", label: "History", title: "Vault history", sub: "Every execution that touched the policy, read from the chain." },
-  { id: "controls", label: "Demo controls", title: "Demo controls", sub: "Stand-ins for the outside world: the Ondo NAV, the market and Circle's bridge." },
+  { id: "controls", label: "Demo controls", title: "Demo controls", sub: "Stand-ins for the USDY NAV and the USDY market, which don't exist on test networks." },
   { id: "script", label: "Demo script", title: "Demo script", sub: "A suggested path through the demo." },
   { id: "how", label: "How it works", title: "How it works", sub: "From Ethereum cash to yield for the fintech's customers." },
 ] as const;
@@ -90,6 +93,7 @@ export function App() {
                 </div>
               </>
             )}
+            {page === "bridge" && <BridgePage d={d} />}
             {page === "customers" && <Customers s={s} />}
             {page === "policy" && <PolicyCard d={d} />}
             {page === "history" && <History d={d} />}
@@ -223,8 +227,8 @@ function Summary({ s }: { s: VaultState }) {
           {fmt(total)}
         </p>
         <p className="sub">
-          A fintech's USDC, bridged from Ethereum, earns US Treasury yield through USDY on Solana. The cash stays in the
-          client's Squads multisig, under rules enforced on-chain by the <em>Tesa policy</em> program.
+          A fintech's USDC, bridged from Ethereum with Circle CCTP, earns US Treasury yield through USDY on Solana. The
+          cash stays in the client's Squads multisig, under rules enforced on-chain by the <em>Tesa policy</em> program.
         </p>
       </div>
       <dl className="kpis">
@@ -280,7 +284,7 @@ function Summary({ s }: { s: VaultState }) {
 // ------------------------------------------------------------------ demo script
 
 const SCRIPT: { title: string; body: string }[] = [
-  { title: "Cash arrives from Ethereum", body: "In Demo controls, bridge USDC with Circle CCTP. It lands in the vault without any signature." },
+  { title: "Cash arrives from Ethereum", body: "In Bridge from Ethereum, send USDC with Circle CCTP: a real burn on Sepolia and a real mint into the vault, in about 30 seconds, with no vault signature." },
   { title: "Propose an allocation", body: "In Operations, the CFO picks an amount and the Tesa key proposes it. Tesa can only propose." },
   { title: "Tesa tries to approve", body: "On the new proposal, press “Tesa key tries to approve”. It fails on-chain." },
   { title: "Two humans sign", body: "Approve as CFO and Controller, then execute. Balances and yield update." },
@@ -802,31 +806,215 @@ function Operator({ d }: { d: Demo }) {
           </button>
         </div>
       </div>
-      <div className="op-row cctp">
-        <div>
-          <p className="lbl">Cash from Ethereum · Circle CCTP</p>
-          <p className="num op-v">{fmt(s.usdc, 0)} USDC <small>in the vault</small></p>
-        </div>
-        <div className="op-btns">
-          <button
-            className="btn btn-ghost btn-xs"
-            disabled={busy}
-            onClick={() => d.run("mint", "Bridge 50,000 USDC from Ethereum (simulated CCTP)", "Circle CCTP", () => d.demo.mintUsdcToVault(toUnits(50_000)))}
-          >
-            Bridge 50,000
-          </button>
-        </div>
-        <ol className="cctp-steps">
-          <li>Fintech burns USDC on Ethereum</li>
-          <li>Circle attests the burn</li>
-          <li>USDC is minted on Solana into the vault. The vault signs nothing.</li>
-        </ol>
-      </div>
       <p className="note">
-        These stand in for the outside world: the Ondo NAV feed, the market, and Circle's bridge (simulated here; CCTP runs
-        Ethereum Sepolia to Solana devnet). None of them can move money out of the vault.
+        These stand in for what doesn't exist on test networks: USDY's NAV (published by Ondo) and the USDY market. None
+        of them can move money out of the vault. The USDC in the vault is real Circle test USDC; see Bridge from Ethereum.
       </p>
     </section>
+  );
+}
+
+// ------------------------------------------------------------------ bridge (Circle CCTP real)
+
+type StepStatus = "idle" | "active" | "done" | "error";
+type BridgeStep = { status: StepStatus; detail: string; href?: string; linkLabel?: string; at?: number };
+const IDLE_STEPS: BridgeStep[] = [
+  { status: "idle", detail: "Approve and burn USDC with Circle's TokenMessenger on Ethereum Sepolia." },
+  { status: "idle", detail: "Circle's attestation service signs the burn (Fast Transfer)." },
+  { status: "idle", detail: "The signed message is delivered on Solana and USDC is minted into the vault." },
+];
+const STEP_TITLES = ["Burn on Ethereum", "Circle attestation", "Mint on Solana"];
+
+function BridgePage({ d }: { d: Demo }) {
+  const s = d.state!;
+  const key = d.demo.cfg.sepoliaKey as Hex | undefined;
+  const [wallet, setWallet] = useState<{ address: string; eth: bigint; usdc: bigint } | null>(null);
+  const [amount, setAmount] = useState("");
+  const [steps, setSteps] = useState<BridgeStep[]>(IDLE_STEPS);
+  const [total, setTotal] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadWallet = useCallback(() => {
+    if (key) sepoliaBalances(key).then(setWallet).catch(() => undefined);
+  }, [key]);
+  useEffect(() => {
+    loadWallet();
+    const t = setInterval(loadWallet, 15_000);
+    return () => clearInterval(t);
+  }, [loadWallet]);
+
+  const units = (() => {
+    try {
+      return toUnits(amount || "0");
+    } catch {
+      return 0n;
+    }
+  })();
+  const running = d.busy === "bridge";
+  const tooMuch = wallet !== null && units > wallet.usdc;
+  const noGas = wallet !== null && wallet.eth < 200_000_000_000_000n; // 0,0002 ETH
+
+  const setStep = (i: number, patch: Partial<BridgeStep>) =>
+    setSteps((prev) => prev.map((st, j) => (j === i ? { ...st, ...patch } : st)));
+
+  const bridge = async () => {
+    if (!key || d.busy) return;
+    d.setBusy("bridge");
+    setError(null);
+    setTotal(null);
+    setSteps(IDLE_STEPS);
+    const t0 = performance.now();
+    const at = () => (performance.now() - t0) / 1000;
+    let i = 0;
+    try {
+      setStep(0, { status: "active", detail: "Approving and burning on Ethereum Sepolia…" });
+      const { maxFee, bps } = await fastTransferMaxFee(units);
+      const { burnHash } = await burnOnSepolia(key, units, d.demo.pk.vaultUsdc, maxFee);
+      setStep(0, {
+        status: "done",
+        detail: `${fmt(units)} USDC burned. Fast Transfer fee ${bps} bps, capped at ${fmt(maxFee, 6)} USDC.`,
+        href: CCTP.sepolia.explorerTx(burnHash),
+        linkLabel: "Etherscan ↗",
+        at: at(),
+      });
+
+      i = 1;
+      setStep(1, { status: "active", detail: "Waiting for Circle…" });
+      const att = await waitForAttestation(burnHash, (st) => setStep(1, { detail: `Circle: ${st.replace(/_/g, " ")}` }));
+      setStep(1, { status: "done", detail: "Burn attested by Circle.", at: at() });
+
+      i = 2;
+      setStep(2, { status: "active", detail: "Delivering the message on Solana…" });
+      const res = await d.demo.receiveIntoVault(att);
+      if (!res.ok) throw new Error(`Mint failed on Solana: ${res.error}`);
+      setStep(2, {
+        status: "done",
+        detail: "USDC minted into the vault's token account. The vault signed nothing.",
+        href: explorerTx(res.signature, d.demo.cfg.cluster),
+        linkLabel: "Solscan ↗",
+        at: at(),
+      });
+      setTotal(at());
+      d.pushLog({
+        label: `Bridge ${fmt(units)} USDC from Ethereum (Circle CCTP)`,
+        actor: "Circle CCTP",
+        pending: false,
+        result: { ...res, ms: at() * 1000 },
+        extra: { href: CCTP.sepolia.explorerTx(burnHash), label: "Burn on Etherscan ↗" },
+      });
+      setAmount("");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message.split("\n")[0] : String(e);
+      setStep(i, { status: "error", detail: msg });
+      setError(msg);
+    } finally {
+      d.setBusy(null);
+      d.refresh();
+      loadWallet();
+    }
+  };
+
+  if (!key) {
+    return (
+      <section className="card">
+        <p className="empty">This vault was created without an Ethereum wallet, so the live bridge is off.</p>
+      </section>
+    );
+  }
+
+  return (
+    <>
+      <div className="bridge">
+        <section className="card" aria-labelledby="bridge-h">
+          <div className="card-head">
+            <h2 id="bridge-h">Send USDC to the vault</h2>
+            <span className="muted small">Ethereum Sepolia → Solana devnet</span>
+          </div>
+          <div className="chains">
+            <div className="chain">
+              <p className="lbl">From · fintech wallet on Ethereum</p>
+              <p className="num op-v">{wallet ? `${fmt(wallet.usdc)} USDC` : "…"}</p>
+              <p className="small muted num">
+                {wallet ? `${(Number(wallet.eth) / 1e18).toFixed(4)} ETH for gas · ` : ""}
+                <a className="link" href={CCTP.sepolia.explorerAddress(wallet?.address ?? "")} target="_blank" rel="noreferrer">
+                  {wallet ? short(wallet.address) : "wallet"} ↗
+                </a>
+              </p>
+            </div>
+            <span className="arrow" aria-hidden="true">→</span>
+            <div className="chain">
+              <p className="lbl">To · client vault on Solana</p>
+              <p className="num op-v">{fmt(s.usdc)} USDC</p>
+              <p className="small muted">
+                <a className="link" href={explorerAccount(d.demo.cfg.vaultUsdc, d.demo.cfg.cluster)} target="_blank" rel="noreferrer">
+                  Vault USDC account ↗
+                </a>
+              </p>
+            </div>
+          </div>
+          <div className="amount-row">
+            <label htmlFor="bridge-amount" className="lbl">
+              Amount in USDC
+            </label>
+            <div className="amount">
+              <input
+                id="bridge-amount"
+                inputMode="decimal"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
+                className="num"
+                placeholder="0"
+                autoComplete="off"
+                disabled={running}
+              />
+              <span className="unit">USDC</span>
+            </div>
+          </div>
+          {tooMuch && <p className="warnings-inline">The Ethereum wallet holds only {fmt(wallet!.usdc)} USDC.</p>}
+          {noGas && <p className="warnings-inline">The Ethereum wallet is almost out of Sepolia ETH for gas.</p>}
+          <div className="actions">
+            <button className="btn btn-primary" disabled={!!d.busy || units === 0n || tooMuch} onClick={bridge}>
+              {running ? "Bridging…" : "Bridge to the vault"}
+            </button>
+            <span className="muted small">About 30 seconds end to end.</span>
+          </div>
+        </section>
+
+        <section className="card" aria-labelledby="steps-h" aria-live="polite">
+          <div className="card-head">
+            <h2 id="steps-h">Transfer</h2>
+            <span className="muted small num">{total !== null ? `Settled in ${total.toFixed(1)} s` : running ? "In progress" : "Not started"}</span>
+          </div>
+          <ol className="bsteps">
+            {steps.map((st, i) => (
+              <li key={STEP_TITLES[i]} className={`bstep ${st.status}`}>
+                <span className="bdot num" aria-hidden="true">
+                  {st.status === "done" ? "✓" : i + 1}
+                </span>
+                <div>
+                  <p className="bstep-t">
+                    {STEP_TITLES[i]}
+                    {st.at !== undefined && <span className="muted small num"> · {st.at.toFixed(1)} s</span>}
+                  </p>
+                  <p className="bstep-d">{st.detail}</p>
+                  {st.href && (
+                    <a className="link small" href={st.href} target="_blank" rel="noreferrer">
+                      {st.linkLabel}
+                    </a>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
+          {error && <p className="tx-err small">The transfer stopped: {error}</p>}
+        </section>
+      </div>
+      <p className="note main-note">
+        This is Circle's real Cross-Chain Transfer Protocol (CCTP V2) on test networks: real burns on Ethereum Sepolia, real
+        attestations from Circle and real Circle test USDC minted on Solana devnet. The vault never signs: Circle's attestation
+        authorizes the mint into the vault's own USDC account. In production the fintech sends from its own Ethereum wallet.
+      </p>
+    </>
   );
 }
 
@@ -870,6 +1058,11 @@ function LogRow({ e, cluster }: { e: LogEntry; cluster: string }) {
         </p>
       )}
       {e.note && <p className="tx-err small">{e.note}</p>}
+      {e.extra && (
+        <a className="link small" href={e.extra.href} target="_blank" rel="noreferrer">
+          {e.extra.label}
+        </a>
+      )}
       {r && (
         <a className="link small" href={explorerTx(r.signature, cluster)} target="_blank" rel="noreferrer">
           View on Solscan ↗
@@ -888,7 +1081,7 @@ function HowItWorks() {
       <div className="flow">
         <div className="flow-step">
           <p className="lbl">Fund</p>
-          <p>A fintech built on Ethereum moves USDC to the vault on Solana with Circle CCTP: burn, attest, mint.</p>
+          <p>A fintech built on Ethereum moves USDC to the vault on Solana with Circle CCTP: burn, attest, mint. Live in this demo.</p>
         </div>
         <div className="flow-step">
           <p className="lbl">Propose</p>
@@ -930,12 +1123,13 @@ function Footer({ demo: d }: { demo: Demo }) {
   return (
     <footer className="foot">
       <p>
-        Demo environment on Solana {c.cluster}: simulated USDC and USDY, a simulated swap market and CCTP bridge, example
-        fintech customers, and demo keys for every signer held in this page. The Squads v4 multisig and the Tesa policy program (
+        Demo environment on Solana {c.cluster}. Real: Circle test USDC bridged from Ethereum Sepolia with CCTP, the Squads v4
+        multisig and the Tesa policy program. Simulated: USDY and its market, which don't exist on test networks. Example
+        fintech customers, and demo keys for every signer held in this page. Tesa policy program (
         <a className="link mono" href={explorerAccount(d.demo.policyProgram.programId.toBase58(), c.cluster)} target="_blank" rel="noreferrer">
           {short(d.demo.policyProgram.programId.toBase58())}
         </a>
-        ) are the real on-chain programs. Vault created {new Date(c.createdAt).toLocaleDateString("en-US", { dateStyle: "medium" })}.
+). Vault created {new Date(c.createdAt).toLocaleDateString("en-US", { dateStyle: "medium" })}.
       </p>
     </footer>
   );
