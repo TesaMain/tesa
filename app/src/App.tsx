@@ -116,6 +116,38 @@ function Mark() {
   );
 }
 
+type Theme = "dark" | "light";
+const THEME_KEY = "tesa-theme";
+
+/** Tema escolhido (salvo no navegador) ou, na primeira visita, o do sistema. */
+function initialTheme(): Theme {
+  const set = document.documentElement.dataset.theme;
+  if (set === "light" || set === "dark") return set;
+  return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+
+function ThemeToggle() {
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+  const choose = (t: Theme) => {
+    setTheme(t);
+    document.documentElement.dataset.theme = t;
+    try {
+      localStorage.setItem(THEME_KEY, t);
+    } catch {
+      /* armazenamento bloqueado: o tema vale só nesta visita */
+    }
+  };
+  return (
+    <div className="theme" role="radiogroup" aria-label="Color theme">
+      {(["dark", "light"] as const).map((t) => (
+        <button key={t} role="radio" aria-checked={theme === t} className={theme === t ? "on" : ""} onClick={() => choose(t)}>
+          {t === "dark" ? "Dark" : "Light"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Sidebar({ demo: d, page }: { demo: Demo; page: PageId }) {
   const c = d.demo.cfg;
   const pending = d.proposals.filter((p) => p.status === "Active" || p.status === "Approved").length;
@@ -140,6 +172,7 @@ function Sidebar({ demo: d, page }: { demo: Demo; page: PageId }) {
         </ul>
       </nav>
       <div className="side-foot">
+        <ThemeToggle />
         <span className="chip live">
           <span className="dot" aria-hidden="true" />
           Solana {c.cluster}

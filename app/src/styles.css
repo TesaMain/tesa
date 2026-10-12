@@ -79,6 +79,9 @@ em { font-family: var(--font-serif); font-style: italic; font-size: 1.1em; color
 .nav a.on { color: var(--ink-100); background: var(--accent-bg); box-shadow: inset 2px 0 0 var(--accent); }
 .count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; display: inline-grid; place-items: center; font-size: 11px; font-weight: 600; color: var(--warn); background: var(--warn-bg); }
 .side-foot { margin-top: auto; display: grid; gap: 10px; justify-items: start; }
+.theme { display: inline-grid; grid-template-columns: 1fr 1fr; padding: 3px; gap: 2px; border-radius: 999px; border: 1px solid var(--rule-strong); background: var(--chip-bg); }
+.theme button { min-height: 26px; padding: 0 12px; border: 0; border-radius: 999px; background: transparent; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--ink-45); }
+.theme button.on { background: var(--card); color: var(--ink-100); box-shadow: 0 1px 0 var(--rule-strong); }
 .main { min-width: 0; max-width: 1180px; padding-inline: 32px; padding-block: 26px 48px; display: grid; gap: 20px; align-content: start; }
 .main > .card, .main > .how { max-width: 860px; }
 /* Página de um card só: o h1 já nomeia o card; o h2 fica só para leitores de tela. */

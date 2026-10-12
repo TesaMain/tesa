@@ -7,6 +7,13 @@
     <meta name="description" content="Live demo on Solana testnet: a Squads multisig vault allocating USDC into USDY under Tesa's on-chain treasury policy." />
     <meta name="robots" content="noindex" />
     <link rel="icon" href="/tesa-favicon.svg" type="image/svg+xml" />
+    <script>
+      // Aplica o tema salvo antes do primeiro paint (evita piscar no tema errado).
+      try {
+        var t = localStorage.getItem("tesa-theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" />
